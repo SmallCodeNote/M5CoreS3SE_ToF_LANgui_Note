@@ -7,18 +7,35 @@
 #include "displayControl.hpp"
 #include "forms.hpp"
 
-/// @brief signal pin assign A-Phase
-VL53L1X sensor;
+form *FormView;
+form_Top Form_Top;
+form_ShutdownMessage Form_ShutdownMessage;
+form_SaveMessage Form_SaveMessage;
+form_Config Form_Config;
+form_QR Form_QR;
 
 /// @brief signal pin assign A-Phase
-// const int Pin_signalA = 2;//Core2:32
-
-/// @brief signal pin assign B-Phase
-// const int Pin_signalB = 1;//Core2:33
+VL53L1X tofSensor;
 
 /// @brief Encorder Count
 int Enc_Count = 0;
 int Enc_CountLast = 0;
+
+static m5::touch_state_t prev_state;
+static constexpr const char *state_name[16] =
+    {"none", "touch", "touch_end", "touch_begin", "___", "hold", "hold_end", "hold_begin", "___", "flick", "flick_end", "flick_begin", "___", "drag", "drag_end", "drag_begin"};
+
+int prev_x = 0;
+int prev_y = 0;
+
+/// @brief QRcode text
+String QRcodeText = "";
+
+/// @brief ConfigForm Up/Down Step
+int ConfigStep = 100;
+
+/// @brief BatteryLevelValueBuff
+int BatteryLevelValue_last = 0;
 
 /// @brief Encorder Profile Struct
 struct DATA_SET
@@ -39,59 +56,60 @@ DATA_SET data;
 M5GFX Display_Main;
 M5Canvas Display_Main_Canvas(&Display_Main);
 
-bool A;
-bool B;
-
-/// @brief Encorder phase History
-byte Enc_Log;
-
-/// @brief Encorder phase History String
-String Enc_Log_String = "";
-
-String EncLogToString()
-{
-  switch (Enc_Log)
-  {
-  case B00000001:
-    Enc_Log_String = "0001";
-    break;
-  case B00000111:
-    Enc_Log_String = "0111";
-    break;
-  case B00001110:
-    Enc_Log_String = "1110";
-    break;
-  case B00001000:
-    Enc_Log_String = "1000";
-    break;
-  case B00000010:
-    Enc_Log_String = "0010";
-    break;
-  case B00001011:
-    Enc_Log_String = "1011";
-    break;
-  case B00001101:
-    Enc_Log_String = "1101";
-    break;
-  case B00000100:
-    Enc_Log_String = "0100";
-    break;
-  }
-  return Enc_Log_String;
-}
-
 void taskGetEncoder(void *pvParameters)
 {
   while (1)
   {
-    Enc_Count = sensor.read();
-    Enc_Log_String = "";
+    Enc_Count = tofSensor.read();
   }
 }
 
-void InitializeComponent()
+void LoadEEPROM()
+{
+  EEPROM.begin(50); // 50byte
+  EEPROM.get<DATA_SET>(0, data);
+
+  if (data.Enc_PPR <= 0)
+  {
+    data.Enc_PPR = 1000;
+    data.Enc_TargetLength = 6000;
+    data.Enc_LPR = 1;
+  }
+}
+
+void SetupTofSensor()
+{
+  M5.Ex_I2C.begin();
+  tofSensor.setBus(&Wire);
+  tofSensor.setTimeout(500);
+
+  if (!tofSensor.init())
+  {
+    Serial.println("Failed to detect and initialize sensor!");
+    while (1)
+      ;
+  }
+
+  // Use long distance mode and allow up to 50000 us (50 ms) for a
+  // measurement. You can change these settings to adjust the performance of
+  // the sensor, but the minimum timing budget is 20 ms for short distance
+  // mode and 33 ms for medium and long distance modes. See the VL53L1X
+  // datasheet for more information on range and timing limits.
+  tofSensor.setDistanceMode(VL53L1X::Long);
+  tofSensor.setMeasurementTimingBudget(50000);
+
+  // Start continuous readings at a rate of one measurement every 50 ms (the
+  // inter-measurement period). This period should be at least as long as the
+  // timing budget.
+  tofSensor.startContinuous(50);
+}
+
+void InitializeDisplay()
 {
   M5.Lcd.printf("Start MainMonitor Initialize\r\n"); // LCDに表示
+
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.setBrightness(50);
 
   // Main Display initialize
   M5.setPrimaryDisplayType(m5gfx::board_M5StackCoreS3SE);
@@ -108,61 +126,21 @@ void InitializeComponent()
   Display_Main_Canvas.setTextColor(0xffd500);
 }
 
-void setup()
+void M5Begin()
 {
-
-  // pinMode(Pin_signalA, INPUT_PULLUP);
-  // pinMode(Pin_signalB, INPUT_PULLUP);
-
-  EEPROM.begin(50); // 50byte
-  EEPROM.get<DATA_SET>(0, data);
-
-  if (data.Enc_PPR <= 0)
-  {
-    data.Enc_PPR = 1000;
-    data.Enc_TargetLength = 6000;
-    data.Enc_LPR = 1;
-  }
-
   auto cfg = M5.config();
   cfg.serial_baudrate = 19200;
-
   M5.begin(cfg);
-  M5.Ex_I2C.begin();
-  sensor.setBus(&Wire);
-  sensor.setTimeout(500);
-  if (!sensor.init())
-  {
-    Serial.println("Failed to detect and initialize sensor!");
-    while (1)
-      ;
-  }
+}
 
-  // Use long distance mode and allow up to 50000 us (50 ms) for a
-  // measurement. You can change these settings to adjust the performance of
-  // the sensor, but the minimum timing budget is 20 ms for short distance
-  // mode and 33 ms for medium and long distance modes. See the VL53L1X
-  // datasheet for more information on range and timing limits.
-  sensor.setDistanceMode(VL53L1X::Long);
-  sensor.setMeasurementTimingBudget(50000);
-
-  // Start continuous readings at a rate of one measurement every 50 ms (the
-  // inter-measurement period). This period should be at least as long as the
-  // timing budget.
-  sensor.startContinuous(50);
-  
-
-  M5.Lcd.setCursor(0, 0);
-
-  Serial.println("\nInitializeComponent");
-  M5.Lcd.setBrightness(50);
-
-  InitializeComponent();
-
-  xTaskCreatePinnedToCore(taskGetEncoder, "Task0", 4096, NULL, 1, NULL, 0);
-
-  // stop watch dog timer : core0
-  disableCore0WDT();
+void setup()
+{
+  M5Begin();
+  LoadEEPROM();
+  SetupTofSensor();
+  InitializeDisplay();
+  xTaskCreatePinnedToCore(taskGetEncoder, "Task0", 4096, NULL, 1, NULL, 0); // start task
+  disableCore0WDT();                                                        // stop watch dog timer : core0
 
   Form_Top = form_Top(Display_Main_Canvas, 0);
   Form_ShutdownMessage = form_ShutdownMessage(Display_Main_Canvas, 0);
@@ -171,33 +149,11 @@ void setup()
   Form_QR = form_QR(Display_Main_Canvas, 0);
 
   FormView = &Form_Top;
-
   FormView->formEnable = true;
 
   int BatteryLevelValue = M5.Power.getBatteryLevel();
   FormView->draw(0, "\t" + String(BatteryLevelValue));
-
-  M5.Lcd.setCursor(0, 0);
-
-  Serial.println("\n" + getStringSplit("ABC\tDE\tF\t", '\t', 2));
-  Serial.println("\n" + getStringSplit("0\t1111\t22\t3333\t44\t55555", '\t', 3));
 }
-
-static m5::touch_state_t prev_state;
-static constexpr const char *state_name[16] =
-    {"none", "touch", "touch_end", "touch_begin", "___", "hold", "hold_end", "hold_begin", "___", "flick", "flick_end", "flick_begin", "___", "drag", "drag_end", "drag_begin"};
-
-int prev_x = 0;
-int prev_y = 0;
-
-/// @brief QRcode text
-String QRcodeText = "";
-
-/// @brief ConfigForm Up/Down Step
-int ConfigStep = 100;
-
-/// @brief BatteryLevelValueBuff
-int BatteryLevelValue_last = 0;
 
 void loop()
 {
@@ -401,6 +357,5 @@ void loop()
   }
 
   BatteryLevelValue_last = BatteryLevelValue;
-
   delay(50);
 }
