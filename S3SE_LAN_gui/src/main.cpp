@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <M5Unified.h>
+#include <SPI.h>
+#include <M5_Ethernet.h>
 #include <EEPROM.h>
 #include <Wire.h>
 #include <VL53L1X.h>
@@ -16,6 +18,47 @@ form_QR Form_QR;
 
 /// @brief signal pin assign A-Phase
 VL53L1X tofSensor;
+
+// == M5Basic_Bus ==
+/*#define SCK  18
+#define MISO 19
+#define MOSI 23
+#define CS   26
+*/
+
+// == M5CORES2_Bus ==
+/*#define SCK  18
+#define MISO 38
+#define MOSI 23
+#define CS   26
+*/
+
+// == M5CORES3_Bus/M5CORES3_SE_Bus ==
+#define SCK 36
+#define MISO 35
+#define MOSI 37
+#define CS 9
+
+//  01 05 00 01 02 00 9d 6a
+char uart_buffer[8] = {0x01, 0x05, 0x00, 0x01, 0x02, 0x00, 0x9d, 0x6a};
+char uart_rx_buffer[8] = {0};
+
+char Num = 0;
+char stringnum = 0;
+unsigned long W5500DataNum = 0;
+unsigned long Send_Num_Ok = 0;
+unsigned long Rec_Num = 0;
+unsigned long Rec_Num_Ok = 0;
+
+// Enter a MAC address and IP address for your controller below.
+// The IP address will be dependent on your local network:
+byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
+IPAddress ip(192, 168, 25, 177);
+
+// Initialize the Ethernet server library
+// with the IP address and port you want to use
+// (port 80 is default for HTTP):
+EthernetServer server(80);
 
 /// @brief Encorder Count
 int Enc_Count = 0;
@@ -48,6 +91,9 @@ struct DATA_SET
 
   /// @brief TargetLength[mm]
   int Enc_TargetLength;
+
+  /// @brief IP address
+  IPAddress ip;
 };
 /// @brief Encorder Profile
 DATA_SET data;
@@ -55,14 +101,6 @@ DATA_SET data;
 /// @brief Main Display
 M5GFX Display_Main;
 M5Canvas Display_Main_Canvas(&Display_Main);
-
-void taskGetEncoder(void *pvParameters)
-{
-  while (1)
-  {
-    Enc_Count = tofSensor.read();
-  }
-}
 
 void LoadEEPROM()
 {
@@ -126,6 +164,78 @@ void InitializeDisplay()
   Display_Main_Canvas.setTextColor(0xffd500);
 }
 
+void EthernetBegin()
+{
+  SPI.begin(SCK, MISO, MOSI, -1);
+  Ethernet.init(CS);
+  // start the Ethernet connection and the server:
+  Ethernet.begin(mac, ip);
+  server.begin();
+}
+
+void ServerProcess()
+{
+  // listen for incoming clients
+  EthernetClient client = server.available();
+  if (client)
+  {
+    Serial.println("new client");
+    // an http request ends with a blank line
+    boolean currentLineIsBlank = true;
+    while (client.connected())
+    {
+      if (client.available())
+      {
+        String EncString = String(data.Enc_LPR * Enc_Count / data.Enc_PPR / 1000.0, 3U);
+        char c = client.read();
+        Serial.write(c);
+        // if you've gotten to the end of the line (received a newline
+        // character) and the line is blank, the http request has ended,
+        // so you can send a reply
+        if (c == '\n' && currentLineIsBlank)
+        {
+          // send a standard http response header
+          client.println("HTTP/1.1 200 OK");
+          client.println("Content-Type: text/html");
+          client.println(
+              "Connection: close");     // the connection will be closed
+                                        // after completion of the
+                                        // response
+          client.println("Refresh: 5"); // refresh the page
+                                        // automatically every 5 sec
+          client.println();
+          client.println("<!DOCTYPE HTML>");
+          client.println("<html>");
+
+          client.println("<body>");
+          client.println("<h1>ToF Value</h1>");
+          client.println("<br />");
+          client.println(EncString);
+          client.println("</body>");
+
+          client.println("</html>");
+          break;
+        }
+        if (c == '\n')
+        {
+          // you're starting a new line
+          currentLineIsBlank = true;
+        }
+        else if (c != '\r')
+        {
+          // you've gotten a character on the current line
+          currentLineIsBlank = false;
+        }
+      }
+    }
+    // give the web browser time to receive the data
+    delay(1);
+    // close the connection:
+    client.stop();
+    Serial.println("client disconnected");
+  }
+}
+
 void M5Begin()
 {
   auto cfg = M5.config();
@@ -133,10 +243,20 @@ void M5Begin()
   M5.begin(cfg);
 }
 
+void taskGetEncoder(void *pvParameters)
+{
+  while (1)
+  {
+    Enc_Count = tofSensor.read();
+
+    ServerProcess();
+  }
+}
 void setup()
 {
   M5Begin();
   LoadEEPROM();
+  EthernetBegin();
   SetupTofSensor();
   InitializeDisplay();
   xTaskCreatePinnedToCore(taskGetEncoder, "Task0", 4096, NULL, 1, NULL, 0); // start task
